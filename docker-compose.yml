@@ -1,0 +1,6 @@
+version: "3.8"
+
+services:
+  exposure-feature-info-agent:
+    image: ghcr.io/theworldavatar/exposure-feature-info-agent:1.0.0
+    build: .
