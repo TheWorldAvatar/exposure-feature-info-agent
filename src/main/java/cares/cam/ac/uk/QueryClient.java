@@ -80,6 +80,7 @@ public class QueryClient {
             if (!metadata.has(datasetName)) {
                 JSONObject exposureJson = new JSONObject();
                 JSONObject calculationJson = new JSONObject();
+                calculationJson.put("collapse", true);
 
                 metadata.put(datasetName, exposureJson);
                 exposureJson.put(calculationName, calculationJson);
@@ -89,6 +90,7 @@ public class QueryClient {
                     metadata.getJSONObject(datasetName).getJSONObject(calculationName).put(distanceKey, exposureValue);
                 } else {
                     JSONObject calculationJson = new JSONObject();
+                    calculationJson.put("collapse", true);
                     calculationJson.put(distanceKey, exposureValue);
                     metadata.getJSONObject(datasetName).put(calculationName, calculationJson);
                 }
