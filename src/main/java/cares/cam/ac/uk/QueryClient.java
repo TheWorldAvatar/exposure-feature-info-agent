@@ -81,6 +81,15 @@ public class QueryClient {
             double exposureValue = parseRdfLiteral(
                     queryResult.getJSONObject(i).getString(exposureValueVar.getVarName()));
 
+            String formattedValue;
+            if (exposureValue % 1 == 0) {
+                // integer
+                formattedValue = String.format("%.0f", exposureValue);
+            } else {
+                // hardcode unit
+                formattedValue = String.format("%.2f m²", exposureValue);
+            }
+
             String distanceKey = distance + " m";
 
             if (!metadata.has(datasetName)) {
@@ -90,14 +99,14 @@ public class QueryClient {
 
                 metadata.put(datasetName, exposureJson);
                 exposureJson.put(calculationName, calculationJson);
-                calculationJson.put(distanceKey, exposureValue);
+                calculationJson.put(distanceKey, formattedValue);
             } else {
                 if (metadata.getJSONObject(datasetName).has(calculationName)) {
-                    metadata.getJSONObject(datasetName).getJSONObject(calculationName).put(distanceKey, exposureValue);
+                    metadata.getJSONObject(datasetName).getJSONObject(calculationName).put(distanceKey, formattedValue);
                 } else {
                     JSONObject calculationJson = new JSONObject();
                     calculationJson.put("collapse", true);
-                    calculationJson.put(distanceKey, exposureValue);
+                    calculationJson.put(distanceKey, formattedValue);
                     metadata.getJSONObject(datasetName).put(calculationName, calculationJson);
                 }
             }
