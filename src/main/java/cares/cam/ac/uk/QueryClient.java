@@ -1,7 +1,6 @@
 package cares.cam.ac.uk;
 
 import java.util.List;
-
 import org.eclipse.rdf4j.model.vocabulary.RDFS;
 import org.eclipse.rdf4j.sparqlbuilder.constraint.propertypath.builder.PropertyPathBuilder;
 import org.eclipse.rdf4j.sparqlbuilder.core.Prefix;
@@ -19,6 +18,9 @@ import com.cmclinnovations.stack.clients.blazegraph.BlazegraphClient;
 import com.cmclinnovations.stack.clients.ontop.OntopClient;
 
 import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
+import uk.ac.cam.cares.jps.base.timeseries.TimeSeries;
+import uk.ac.cam.cares.jps.base.timeseries.TimeSeriesClient;
+import uk.ac.cam.cares.jps.base.timeseries.TimeSeriesClientFactory;
 
 public class QueryClient {
     RemoteStoreClient remoteStoreClient;
@@ -29,17 +31,21 @@ public class QueryClient {
             .prefix("derivation", Rdf.iri("https://www.theworldavatar.com/kg/ontoderivation/"));
     static final Prefix PREFIX_EXPOSURE = SparqlBuilder
             .prefix("exposure", Rdf.iri("https://www.theworldavatar.com/kg/ontoexposure/"));
+    static final Prefix PREFIX_TIMESERIES = SparqlBuilder
+            .prefix("timeseries", Rdf.iri("https://www.theworldavatar.com/kg/ontotimeseries/"));
 
     static final Iri IS_DERIVED_FROM = PREFIX_DERIVATION.iri("isDerivedFrom");
     static final Iri IS_DERIVED_USING = PREFIX_DERIVATION.iri("isDerivedUsing");
     static final Iri BELONGS_TO = PREFIX_DERIVATION.iri("belongsTo");
     static final Iri HAS_VALUE = PREFIX_EXPOSURE.iri("hasValue");
     static final Iri HAS_DISTANCE = PREFIX_EXPOSURE.iri("hasDistance");
+    static final Iri HAS_TIME_SERIES = PREFIX_TIMESERIES.iri("hasTimeSeries");
+    static final Iri HAS_TIME_CLASS = PREFIX_TIMESERIES.iri("hasTimeClass");
 
     public QueryClient() {
-        remoteStoreClient = new RemoteStoreClient();
         blazegraphUrl = BlazegraphClient.getInstance().readEndpointConfig().getUrl("kb");
         ontopUrl = OntopClient.getInstance("ontop").readEndpointConfig().getUrl();
+        remoteStoreClient = new RemoteStoreClient(blazegraphUrl);
     }
 
     JSONObject getResults(String iri) {
@@ -101,10 +107,14 @@ public class QueryClient {
         return metadata;
     }
 
+    JSONObject getResultsTrajectory(String iri, String lowerbound, String upperbound) {
+        return new JSONObject();
+    }
+
     /**
      * parse something like "1000"^^<http://www.w3.org/2001/XMLSchema#integer>
      */
-    double parseRdfLiteral(String literal) {
+    private double parseRdfLiteral(String literal) {
         try {
             return Double.parseDouble(literal);
         } catch (NumberFormatException e) {
@@ -114,5 +124,30 @@ public class QueryClient {
             String value = literal.substring(start, end);
             return Double.parseDouble(value);
         }
+    }
+
+    private Object convertTimeForTimeSeries(String time, String iri) {
+        try {
+            if (time == null) {
+                return null;
+            } else {
+                return Long.parseLong(time);
+            }
+        } catch (NumberFormatException e) {
+            String errmsg = "Only epoch seconds supported for now";
+            throw new RuntimeException(errmsg, e);
+        }
+
+    }
+
+    private String getJavaTimeClass(String iri) {
+        SelectQuery query = Queries.SELECT();
+        Variable classNameVar = query.var();
+        query.where(
+                Rdf.iri(iri).has(PropertyPathBuilder.of(HAS_TIME_SERIES).then(HAS_TIME_CLASS).build(), classNameVar))
+                .prefix(PREFIX_TIMESERIES);
+
+        JSONArray queryResult = remoteStoreClient.executeQuery(query.getQueryString());
+        return queryResult.getJSONObject(0).getString(classNameVar.getVarName());
     }
 }

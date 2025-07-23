@@ -13,14 +13,14 @@ import org.apache.http.entity.ContentType;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import uk.ac.cam.cares.jps.base.agent.JPSAgent;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-@WebServlet(urlPatterns = { "/feature-info-agent/get" })
-public class ExposureFeatureInfoAgent extends JPSAgent {
+@WebServlet(urlPatterns = { ExposureFeatureInfoAgent.STANDARD_ROUTE, ExposureFeatureInfoAgent.TRAJECTORY_ROUTE })
+public class ExposureFeatureInfoAgent extends HttpServlet {
     private static final Logger LOGGER = LogManager.getLogger(ExposureFeatureInfoAgent.class);
+    static final String STANDARD_ROUTE = "/feature-info-agent/get";
+    static final String TRAJECTORY_ROUTE = "/trajectory/feature-info-agent/get";
     QueryClient queryClient;
 
     @Override
@@ -29,15 +29,19 @@ public class ExposureFeatureInfoAgent extends JPSAgent {
         LOGGER.info("Received request for iri = <{}>", iri);
 
         JSONObject response = new JSONObject();
-        response.put("meta", queryClient.getResults(iri));
+        if (req.getServletPath().equals(STANDARD_ROUTE)) {
+            response.put("meta", queryClient.getResults(iri));
+        } else if (req.getServletPath().equals(TRAJECTORY_ROUTE)) {
+            String lowerbound = req.getParameter("lowerbound");
+            String upperbound = req.getParameter("upperbound");
+            response.put("meta", queryClient.getResultsTrajectory(iri, lowerbound, upperbound));
+        }
 
         try {
             resp.setStatus(Response.Status.OK.getStatusCode());
-            resp.getWriter().write(response.toString(2));
-            resp.setContentType("text/json");
-            resp.getWriter().flush();
-            // resp.setContentType(ContentType.APPLICATION_JSON.getMimeType());
-            // resp.setCharacterEncoding("UTF-8");
+            resp.getWriter().write(response.toString());
+            resp.setContentType(ContentType.APPLICATION_JSON.getMimeType());
+            resp.setCharacterEncoding("UTF-8");
         } catch (IOException e) {
             LOGGER.error(e.getMessage());
             LOGGER.error("Failed to write HTTP response");
