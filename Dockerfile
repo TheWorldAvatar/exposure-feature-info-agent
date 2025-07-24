@@ -1,6 +1,6 @@
 # First stage: download the Java dependencies (allows them to be cached if unchanged)
 #==================================================================================================
-FROM maven:3.8.3-adoptopenjdk-11 AS retriever
+FROM maven:3.9.6-eclipse-temurin-17 AS retriever
 
 # Copy in Maven settings templates and credentials 
 COPY docker/credentials /root/credentials
@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=aermod-mvn,target=/root/.m2/repository,sharing=locked 
 # Second stage: build war file
 #==================================================================================================
 
-FROM maven:3.8.3-adoptopenjdk-11 AS builder
+FROM maven:3.9.6-eclipse-temurin-17 AS builder
 
 COPY --from=retriever /root/.m2 /root/.m2
 

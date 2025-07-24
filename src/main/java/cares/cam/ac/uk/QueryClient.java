@@ -1,6 +1,12 @@
 package cares.cam.ac.uk;
 
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+
+import org.apache.logging.log4j.Logger;
 import org.eclipse.rdf4j.model.vocabulary.RDFS;
 import org.eclipse.rdf4j.sparqlbuilder.constraint.propertypath.builder.PropertyPathBuilder;
 import org.eclipse.rdf4j.sparqlbuilder.core.Prefix;
@@ -16,14 +22,22 @@ import org.json.JSONObject;
 
 import com.cmclinnovations.stack.clients.blazegraph.BlazegraphClient;
 import com.cmclinnovations.stack.clients.ontop.OntopClient;
+import com.cmclinnovations.stack.clients.postgis.PostGISClient;
 
+import uk.ac.cam.cares.jps.base.query.RemoteRDBStoreClient;
 import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeries;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeriesClient;
 import uk.ac.cam.cares.jps.base.timeseries.TimeSeriesClientFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class QueryClient {
+    private static final Logger LOGGER = LogManager.getLogger(QueryClient.class);
+
     RemoteStoreClient remoteStoreClient;
+    RemoteStoreClient ontopClient;
+    RemoteRDBStoreClient remoteRDBStoreClient;
     String blazegraphUrl;
     String ontopUrl;
 
@@ -45,7 +59,15 @@ public class QueryClient {
     public QueryClient() {
         blazegraphUrl = BlazegraphClient.getInstance().readEndpointConfig().getUrl("kb");
         ontopUrl = OntopClient.getInstance("ontop").readEndpointConfig().getUrl();
-        remoteStoreClient = new RemoteStoreClient(blazegraphUrl);
+
+        remoteStoreClient = BlazegraphClient.getInstance().getRemoteStoreClient("kb");
+        ontopClient = new RemoteStoreClient(ontopUrl);
+
+        String rdbUrl = PostGISClient.getInstance().readEndpointConfig().getJdbcURL("postgres");
+        String user = PostGISClient.getInstance().readEndpointConfig().getUsername();
+        String password = PostGISClient.getInstance().readEndpointConfig().getPassword();
+
+        remoteRDBStoreClient = new RemoteRDBStoreClient(rdbUrl, user, password);
     }
 
     JSONObject getResults(String iri) {
@@ -81,16 +103,9 @@ public class QueryClient {
             double exposureValue = parseRdfLiteral(
                     queryResult.getJSONObject(i).getString(exposureValueVar.getVarName()));
 
-            String formattedValue;
-            if (exposureValue % 1 == 0) {
-                // integer
-                formattedValue = String.format("%.0f", exposureValue);
-            } else {
-                // hardcode unit
-                formattedValue = String.format("%.2f m²", exposureValue);
-            }
+            String formattedValue = String.format("%.0f", exposureValue);
 
-            String distanceKey = distance + " m";
+            String distanceKey = String.format("%.0f", distance) + " m";
 
             if (!metadata.has(datasetName)) {
                 JSONObject exposureJson = new JSONObject();
@@ -117,7 +132,96 @@ public class QueryClient {
     }
 
     JSONObject getResultsTrajectory(String iri, String lowerbound, String upperbound) {
-        return new JSONObject();
+        SelectQuery query = Queries.SELECT();
+        Iri subject = Rdf.iri(iri);
+        Variable derivation = query.var();
+        Variable exposure = query.var();
+        Variable calculation = query.var();
+        Variable exposureResultVar = query.var();
+        Variable distanceVar = query.var();
+        Variable calculationType = query.var();
+        Variable calculationLabel = query.var();
+
+        TriplePattern gp1 = derivation.has(IS_DERIVED_FROM, subject)
+                .andHas(PropertyPathBuilder.of(IS_DERIVED_FROM).then(RDFS.LABEL).build(), exposure)
+                .andHas(IS_DERIVED_USING, calculation);
+        TriplePattern gp2 = exposureResultVar.has(BELONGS_TO, derivation);
+        TriplePattern gp3 = calculation.isA(calculationType).andHas(HAS_DISTANCE, distanceVar);
+        TriplePattern gp4 = calculationType.has(RDFS.LABEL, calculationLabel);
+
+        query.where(gp1, gp2, gp3, gp4.optional())
+                .select(exposure, calculationType, distanceVar, exposureResultVar, calculationLabel)
+                .prefix(PREFIX_DERIVATION, PREFIX_EXPOSURE);
+
+        JSONArray queryResult = remoteStoreClient.executeFederatedQuery(List.of(blazegraphUrl, ontopUrl),
+                query.getQueryString());
+
+        JSONObject metadata = new JSONObject();
+
+        TimeSeriesClient timeSeriesClient;
+        try {
+            timeSeriesClient = TimeSeriesClientFactory.getInstance(remoteStoreClient, List.of(iri));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        try (Connection conn = remoteRDBStoreClient.getConnection()) {
+            for (int i = 0; i < queryResult.length(); i++) {
+                String datasetName = queryResult.getJSONObject(i).getString(exposure.getVarName());
+
+                String calculationName;
+
+                if (queryResult.getJSONObject(i).has(calculationLabel.getVarName())) {
+                    calculationName = queryResult.getJSONObject(i).getString(calculationLabel.getVarName());
+                } else {
+                    calculationName = queryResult.getJSONObject(i).getString(calculationType.getVarName());
+                    calculationName = calculationName.substring(calculationName.lastIndexOf('/') + 1);
+                }
+
+                double distance = parseRdfLiteral(queryResult.getJSONObject(i).getString(distanceVar.getVarName()));
+                String distanceKey = String.format("%.0f", distance) + " m";
+
+                String exposureResult = queryResult.getJSONObject(i).getString(exposureResultVar.getVarName());
+
+                double exposureValue = getExposureResult(timeSeriesClient, exposureResult, lowerbound, upperbound,
+                        conn);
+                String formattedValue = String.format("%.0f", exposureValue);
+
+                if (!metadata.has(datasetName)) {
+                    JSONObject exposureJson = new JSONObject();
+                    JSONObject calculationJson = new JSONObject();
+                    calculationJson.put("collapse", true);
+
+                    metadata.put(datasetName, exposureJson);
+                    exposureJson.put(calculationName, calculationJson);
+                    calculationJson.put(distanceKey, formattedValue);
+                } else {
+                    if (metadata.getJSONObject(datasetName).has(calculationName)) {
+                        metadata.getJSONObject(datasetName).getJSONObject(calculationName).put(distanceKey,
+                                formattedValue);
+                    } else {
+                        JSONObject calculationJson = new JSONObject();
+                        calculationJson.put("collapse", true);
+                        calculationJson.put(distanceKey, formattedValue);
+                        metadata.getJSONObject(datasetName).put(calculationName, calculationJson);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+        return metadata;
+    }
+
+    double getExposureResult(TimeSeriesClient timeSeriesClient, String iri, Object lowerbound, Object upperbound,
+            Connection conn) {
+        TimeSeries timeSeries = timeSeriesClient.getTimeSeriesWithinBounds(List.of(iri), lowerbound, upperbound, conn);
+        Set<Double> resultSet = new HashSet<>(timeSeries.getValuesAsDouble(iri));
+        if (resultSet.size() > 1) {
+            throw new RuntimeException("Results related to trips to be implemented");
+        }
+        return resultSet.iterator().next();
     }
 
     /**
@@ -135,7 +239,7 @@ public class QueryClient {
         }
     }
 
-    private Object convertTimeForTimeSeries(String time, String iri) {
+    private Object convertTimeForTimeSeries(String time) {
         try {
             if (time == null) {
                 return null;
