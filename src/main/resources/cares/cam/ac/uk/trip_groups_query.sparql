@@ -1,0 +1,10 @@
+PREFIX time: <http://www.w3.org/2006/time#>
+PREFIX timeseries: <https://www.theworldavatar.com/kg/ontotimeseries/>
+
+SELECT DISTINCT ?time ?trip
+WHERE {
+    ?observation timeseries:observationOf <[TRIP_IRI]> ;
+        time:hasTime/time:inTimePosition/time:numericPosition ?time ;
+        timeseries:hasResult/timeseries:hasValue ?trip .
+}
+ORDER BY ?time

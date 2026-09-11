@@ -410,6 +410,10 @@ public class QueryClient {
         LOGGER.info("Executing time series query");
         JSONArray queryResult = federateClient.executeQuery(query1);
 
+        if (queryResult.isEmpty()) {
+            return new JSONObject();
+        }
+
         Map<String, Double> resultToValueMap = new HashMap<>();
 
         for (int i = 0; i < queryResult.length(); i++) {
@@ -471,7 +475,8 @@ public class QueryClient {
             calculationName = formatCalculationLabel(
                     calculationName.substring(calculationName.lastIndexOf('/') + 1));
             String distanceKey = String.format("%.0f", distance) + " m";
-            String formattedValue = String.format("%.0f %s", exposureValue, exposureUnit);
+            String formattedValue = String.format("%.0f %s", exposureValue,
+                    exposureUnit == null || exposureUnit.isBlank() ? "[-]" : exposureUnit.strip());
 
             if (!metadata.has(datasetName)) {
                 JSONObject exposureJson = new JSONObject();
@@ -524,6 +529,153 @@ public class QueryClient {
             return null;
         }
         return queryResult.getJSONObject(0).getString(tripVar.getVarName());
+    }
+
+    /** Input bounds, stored observation times and output stay bounds use epoch seconds. */
+    JSONArray getTimelineResults(String userId, double lower, double upper) {
+        if (userId.isBlank() || userId.matches(".*[\\s<>\"{}|\\\\^`].*")) {
+            throw new IllegalArgumentException("Token subject cannot form a user IRI");
+        }
+        String person = "https://w3id.org/MON/person.owl#person_" + userId;
+        java.net.URI.create(person);
+        SelectQuery ownership = Queries.SELECT();
+        Variable point = SparqlBuilder.var("point");
+        Variable device = ownership.var();
+        Variable sensor = ownership.var();
+        ownership.select(point).distinct().where(
+                Rdf.iri(person).has(Rdf.iri("https://www.theworldavatar.com/kg/sensorloggerapp/hasA"), device),
+                device.has(Rdf.iri("https://saref.etsi.org/core/consistsOf"), sensor),
+                sensor.has(Rdf.iri("https://www.theworldavatar.com/kg/ontodevice/hasGeoLocation"), point));
+        JSONArray points = federateClient.executeQuery(ownership.getQueryString());
+        JSONArray observations = new JSONArray();
+        String template;
+        try (InputStream is = QueryClient.class.getResourceAsStream("trip_groups_query.sparql")) {
+            template = IOUtils.toString(is, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read trip_groups_query.sparql", e);
+        }
+        for (int i = 0; i < points.length(); i++) {
+            String pointIri = points.getJSONObject(i).getString("point");
+            String tripIri = getTripIri(pointIri);
+            if (tripIri == null) {
+                continue; // A user's new point series may not have been processed yet.
+            }
+            JSONArray rows = federateClient.executeQuery(template.replace("[TRIP_IRI]", tripIri));
+            for (int j = 0; j < rows.length(); j++) {
+                observations.put(rows.getJSONObject(j).put("point", pointIri));
+            }
+        }
+        JSONArray groups = groupTripObservations(observations, lower, upper);
+        for (int i = 0; i < groups.length(); i++) {
+            JSONObject group = groups.getJSONObject(i);
+            JSONObject results = new JSONObject();
+            JSONObject samples = group.getJSONObject("samples");
+            for (String pointIri : samples.keySet()) {
+                mergeTimelineResults(results, getResultsTrajectory(pointIri, group.getInt("trip"),
+                        samples.get(pointIri).toString()));
+            }
+            group.remove("samples");
+            group.remove("sample_time");
+            group.put("results", results);
+        }
+        return groups;
+    }
+
+    static void mergeTimelineResults(JSONObject target, JSONObject source) {
+        for (String key : source.keySet()) {
+            Object value = source.get(key);
+            if (!target.has(key)) {
+                target.put(key, value);
+            } else if (value instanceof JSONObject && target.get(key) instanceof JSONObject) {
+                mergeTimelineResults(target.getJSONObject(key), (JSONObject) value);
+            } else if (!target.get(key).equals(value)) {
+                throw new IllegalStateException("Conflicting exposure results across point series for " + key);
+            }
+        }
+    }
+
+    JSONArray getResultsTrajectoryRange(String iri, double lower, double upper) {
+        String tripIri = getTripIri(iri);
+        if (tripIri == null) {
+            throw new IllegalArgumentException("Trajectory must contain trip information");
+        }
+        String query;
+        try (InputStream is = QueryClient.class.getResourceAsStream("trip_groups_query.sparql")) {
+            query = IOUtils.toString(is, StandardCharsets.UTF_8).replace("[TRIP_IRI]", tripIri);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read trip_groups_query.sparql", e);
+        }
+        // Read all trip observations before filtering to preserve full stay bounds and numbering.
+        JSONArray groups = groupTripObservations(federateClient.executeQuery(query), lower, upper);
+        for (int i = 0; i < groups.length(); i++) {
+            JSONObject group = groups.getJSONObject(i);
+            String sampleTime = group.getString("sample_time");
+            group.remove("sample_time");
+            group.put("results", getResultsTrajectory(iri, group.getInt("trip"), sampleTime));
+        }
+        // Preserve the chronological order established by groupTripObservations.
+        return groups;
+    }
+
+    static JSONArray groupTripObservations(JSONArray observations, double lower, double upper) {
+        List<JSONObject> rows = new ArrayList<>();
+        for (int i = 0; i < observations.length(); i++) {
+            rows.add(observations.getJSONObject(i));
+        }
+        rows.sort(Comparator.comparingDouble(row -> row.getDouble("time")));
+        for (int i = 0; i < rows.size(); i++) {
+            double time = rows.get(i).getDouble("time");
+            if (!Double.isFinite(time)) {
+                throw new IllegalStateException("Trip observation time must be finite");
+            }
+            if (i > 0 && time == rows.get(i - 1).getDouble("time")
+                    && rows.get(i).getInt("trip") != rows.get(i - 1).getInt("trip")) {
+                throw new IllegalStateException("Conflicting trip indices at time " + time);
+            }
+        }
+        JSONArray groups = new JSONArray();
+        int stay = 0;
+        Set<String> keys = new HashSet<>();
+        for (int first = 0; first < rows.size();) {
+            int trip = rows.get(first).getInt("trip");
+            int end = first + 1;
+            while (end < rows.size() && rows.get(end).getInt("trip") == trip) {
+                end++;
+            }
+            String key = trip == 0 ? "stay-" + (++stay) : "trip-" + trip;
+            if (!keys.add(key)) {
+                throw new IllegalStateException("Nonzero trip index occurs in multiple separate groups: " + trip);
+            }
+            double startSeconds = rows.get(first).getDouble("time");
+            double endSeconds = rows.get(end - 1).getDouble("time");
+            if (!Double.isFinite(startSeconds) || !Double.isFinite(endSeconds)) {
+                throw new IllegalStateException("Trip observation time must be finite");
+            }
+            if (startSeconds <= upper && endSeconds >= lower) {
+                JSONObject group = new JSONObject();
+                group.put("key", key);
+                group.put("trip", trip);
+                // Results repeat within the group, so query only its first observation.
+                group.put("sample_time", rows.get(first).get("time").toString());
+                JSONObject samples = new JSONObject();
+                for (int i = first; i < end; i++) {
+                    JSONObject row = rows.get(i);
+                    if (row.has("point") && !samples.has(row.getString("point"))) {
+                        samples.put(row.getString("point"), row.get("time"));
+                    }
+                }
+                if (!samples.isEmpty()) {
+                    group.put("samples", samples);
+                }
+                if (trip == 0) {
+                    group.put("lowerbound", startSeconds);
+                    group.put("upperbound", endSeconds);
+                }
+                groups.put(group);
+            }
+            first = end;
+        }
+        return groups;
     }
 
     /**
