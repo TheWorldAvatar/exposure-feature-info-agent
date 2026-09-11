@@ -1,6 +1,7 @@
 package cares.cam.ac.uk;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 import javax.servlet.ServletException;
 import javax.servlet.annotation.WebServlet;
@@ -16,10 +17,12 @@ import org.json.JSONObject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-@WebServlet(urlPatterns = { ExposureFeatureInfoAgent.STANDARD_ROUTE, ExposureFeatureInfoAgent.TRAJECTORY_ROUTE })
+@WebServlet(urlPatterns = { ExposureFeatureInfoAgent.STANDARD_ROUTE, ExposureFeatureInfoAgent.TRAJECTORY_ROUTE,
+        ExposureFeatureInfoAgent.SQL_ROUTE })
 public class ExposureFeatureInfoAgent extends HttpServlet {
     private static final Logger LOGGER = LogManager.getLogger(ExposureFeatureInfoAgent.class);
     static final String STANDARD_ROUTE = "/feature-info-agent/get";
+    static final String SQL_ROUTE = "/sql/feature-info-agent/get";
     static final String TRAJECTORY_ROUTE = "/trajectory/feature-info-agent/get";
     QueryClient queryClient;
 
@@ -31,6 +34,8 @@ public class ExposureFeatureInfoAgent extends HttpServlet {
         JSONObject response = new JSONObject();
         if (req.getServletPath().equals(STANDARD_ROUTE)) {
             response.put("meta", queryClient.getExposureResults(iri));
+        } else if (req.getServletPath().equals(SQL_ROUTE)) {
+            response.put("meta", queryClient.getExposureResultsSql(iri));
         } else if (req.getServletPath().equals(TRAJECTORY_ROUTE)) {
             String tripIndexString = req.getParameter("trip");
             String time = req.getParameter("time_as_number");
@@ -47,9 +52,10 @@ public class ExposureFeatureInfoAgent extends HttpServlet {
 
         try {
             resp.setStatus(Response.Status.OK.getStatusCode());
-            resp.getWriter().write(response.toString());
             resp.setContentType(ContentType.APPLICATION_JSON.getMimeType());
             resp.setCharacterEncoding("UTF-8");
+            resp.getOutputStream().write(
+                    response.toString().getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             LOGGER.error(e.getMessage());
             LOGGER.error("Failed to write HTTP response");

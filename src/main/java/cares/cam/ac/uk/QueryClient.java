@@ -3,11 +3,16 @@ package cares.cam.ac.uk;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -32,18 +37,27 @@ import org.json.JSONObject;
 
 import com.cmclinnovations.stack.clients.blazegraph.BlazegraphClient;
 import com.cmclinnovations.stack.clients.ontop.OntopClient;
+import com.cmclinnovations.stack.clients.postgis.PostGISClient;
 import com.cmclinnovations.stack.clients.rdf4j.Rdf4jClient;
 
 import cares.cam.ac.uk.classes.CalculationMethod;
 import cares.cam.ac.uk.classes.ExposureResult;
 import uk.ac.cam.cares.jps.base.derivation.ValuesPattern;
 import uk.ac.cam.cares.jps.base.query.RemoteStoreClient;
+import uk.ac.cam.cares.jps.base.query.RemoteRDBStoreClient;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.logging.log4j.LogManager;
 
 public class QueryClient {
     private static final Logger LOGGER = LogManager.getLogger(QueryClient.class);
+
+    private static String formatCalculationLabel(String name) {
+        String label = name.replaceAll("([A-Z]+)([A-Z][a-z])", "$1 $2")
+                .replaceAll("([a-z0-9])([A-Z])", "$1 $2")
+                .toLowerCase(Locale.ROOT);
+        return label.isEmpty() ? label : Character.toUpperCase(label.charAt(0)) + label.substring(1);
+    }
 
     RemoteStoreClient federateClient;
     RemoteStoreClient ontopClient;
@@ -118,6 +132,41 @@ public class QueryClient {
             exposureSet.add(exposureIri);
             resultList.add(new ExposureResult(exposureIri, calculationIri, value, unit));
         }
+        return formatExposureResults(resultList, calculationMap, exposureSet);
+    }
+
+    JSONObject getExposureResultsSql(String iri) {
+        RemoteRDBStoreClient rdbClient = PostGISClient.getInstance().getRemoteStoreClient(Config.DATABASE);
+        String sql = "SELECT DISTINCT exposure, calculation, value, unit, percentile "
+                + "FROM exposure_result WHERE subject = ? "
+                + "AND exposure <> subject AND calculation IS NOT NULL "
+                + "AND value IS NOT NULL AND unit IS NOT NULL";
+        Map<String, CalculationMethod> calculationMap = new HashMap<>();
+        Set<String> exposureSet = new HashSet<>();
+        List<ExposureResult> resultList = new ArrayList<>();
+        try (Connection connection = rdbClient.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, iri);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String exposureIri = rows.getString("exposure");
+                    String calculationIri = rows.getString("calculation");
+                    double percentileValue = rows.getDouble("percentile");
+                    Double percentile = rows.wasNull() ? null : percentileValue;
+                    calculationMap.computeIfAbsent(calculationIri, CalculationMethod::new);
+                    exposureSet.add(exposureIri);
+                    resultList.add(new ExposureResult(exposureIri, calculationIri,
+                            rows.getDouble("value"), rows.getString("unit"), percentile));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query exposure results", e);
+        }
+        return formatExposureResults(resultList, calculationMap, exposureSet);
+    }
+
+    private JSONObject formatExposureResults(List<ExposureResult> resultList,
+            Map<String, CalculationMethod> calculationMap, Set<String> exposureSet) {
         setCalculationProperties(calculationMap);
         Map<String, String> exposureMap = getExposureName(exposureSet);
 
@@ -142,6 +191,7 @@ public class QueryClient {
             }
 
             JSONObject datasetJson = metadata.getJSONObject(datasetName);
+            datasetJson.put("collapse", true);
 
             // cycle through to check each dataset filter is initialised
             JSONObject currentLevel = datasetJson;
@@ -255,7 +305,7 @@ public class QueryClient {
             queriedCalc.add(calculationIri);
             String calcType = queryResult.getJSONObject(i).getString(calculationType.getVarName());
             calcType = calcType.substring(calcType.lastIndexOf('/') + 1);
-            calculationMap.get(calculationIri).setName(calcType);
+            calculationMap.get(calculationIri).setName(formatCalculationLabel(calcType));
 
             if (queryResult.getJSONObject(i).has(distanceVar.getVarName())) {
                 double distance = queryResult.getJSONObject(i).getDouble(distanceVar.getVarName());
@@ -418,7 +468,8 @@ public class QueryClient {
             String datasetName = resultToDatasetMap.get(r);
             String exposureUnit = resultToUnitMap.get(r);
             String calculationName = resultToCalculationMap.get(r);
-            calculationName = calculationName.substring(calculationName.lastIndexOf('/') + 1);
+            calculationName = formatCalculationLabel(
+                    calculationName.substring(calculationName.lastIndexOf('/') + 1));
             String distanceKey = String.format("%.0f", distance) + " m";
             String formattedValue = String.format("%.0f %s", exposureValue, exposureUnit);
 
